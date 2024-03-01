@@ -3,6 +3,7 @@ import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
+from vllm import LLM, SamplingParams
 
 from datasets import Dataset, load_dataset
 from tqdm.auto import tqdm
@@ -10,9 +11,32 @@ from transformers import HfArgumentParser
 
 import magicoder
 
-# DO NOT CHANGE THE FOLLOWING
-SYSTEM = "You are exceptionally skilled at crafting high-quality programming problems and offering precise solutions."
 ERROR_MARGIN = 10
+
+
+def make_starcoder2_prompt(code: str, lang: str) -> str:
+    return f"""
+<issue_start>username_0: You are exceptionally skilled at crafting high-quality programming problems and
+offering precise solutions.
+Please gain inspiration from the following random code snippet to create a
+high-quality programming problem in {lang.title()}. Present your output in two distinct sections:
+[Problem Description] and [Solution].
+
+Code snippet for inspiration:
+```{lang}
+{code}
+```
+Guidelines for each section:
+1. [Problem Description]: This should be **completely self-contained**, providing
+all the contextual information one needs to understand and solve the problem.
+Assume common programming knowledge, but ensure that any specific context,
+variables, or code snippets pertinent to this problem are explicitly included.
+2. [Solution]: Offer a comprehensive, **correct** solution that accurately
+addresses the [Problem Description] you provided.<issue_comment>username_1: Sure, no problem. I will be able to help. I am  exceptionally skilled at crafting high-quality programming problems and
+offering precise solutions.
+I will use your provided code snippet as inspiration for the problem.
+
+# [Problem Description]"""
 
 
 @dataclass(frozen=True)
@@ -25,8 +49,10 @@ class Args:
     # Keep the following arguments unchanged for reproducibility
     seed: int = field(default=976)
 
-    temperature: float = field(default=0.0)
-    model: str = field(default="gpt-3.5-turbo-1106")
+    temperature: float = field(default=0.45)
+    top_p: float = field(default=0.9)
+    model: str = field(default="bigcode/starcoder2-15b")
+    num_gpus: int = field(default=1)
     model_max_tokens: int = field(default=8192)
     max_new_tokens: int = field(default=2500)
 
@@ -93,7 +119,6 @@ def main():
         if args.max_considered_data is not None
         else "train"
     )
-    assert magicoder.utils.OPENAI_CLIENT is not None
     dataset: Dataset = load_dataset(
         args.dataset_name,
         data_dir=args.data_dir,
@@ -111,13 +136,13 @@ def main():
     )
     dataset = dataset.shuffle(seed=args.seed)
     dataset = dataset.map(lambda _, index: {"index": index}, with_indices=True)
+    model = LLM(args.model, tensor_parallel_size=args.num_gpus)
 
     # Every run should produce the same data as long as the default params are not changed
     start_index = args.seed_code_start_index
     end_index = min(start_index + args.max_new_data, len(dataset))
     dataset = dataset.select(range(start_index, end_index))
 
-    prompt_template = Path("data/prompt.txt").read_text()
     timestamp = magicoder.utils.timestamp()
     if args.continue_from is not None:
         assert f"{start_index}_{end_index}" in args.continue_from, "Index mismatch"
@@ -138,11 +163,12 @@ def main():
         f_out = path.open("w")
         print("Saving to", path)
         n_skipped = 0
+
     for index, example in enumerate(tqdm(dataset)):
         if index < n_skipped:
             continue
         assert index + start_index == example["index"]
-        prompt = prompt_template.format(code=example["seed"])
+        prompt = make_starcoder2_prompt(example["seed"], args.data_dir)
         # Make sure the generation is within the context size of the model
         max_new_tokens = min(
             args.max_new_tokens,
@@ -153,24 +179,20 @@ def main():
         )
         if max_new_tokens <= 0:
             continue
-        messages = [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": prompt},
-        ]
-        openai_seed = args.seed + example["index"]
-        response = magicoder.utils.chat_completions_with_backoff(
-            model=args.model,
-            messages=messages,
-            max_tokens=max_new_tokens,
-            n=1,
-            temperature=args.temperature,
-            seed=openai_seed,
+        response = model.generate(
+            prompt,
+            SamplingParams(
+                temperature=args.temperature,
+                top_p=args.top_p,
+                max_tokens=max_new_tokens,
+                stop=["<issue_comment>", "<issue_start>"],
+            )
         )
-        print(openai_seed)
-        choice = response.choices[0]
+        choice = response[0].outputs[0]
         if choice.finish_reason != "stop":
             continue
-        parsing_result = parse_problem_solution(choice.message.content)
+        text = "# [Problem Description]\n" + choice.text
+        parsing_result = parse_problem_solution(text)
         if parsing_result is None:
             continue
         problem, solution = parsing_result

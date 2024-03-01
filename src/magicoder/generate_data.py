@@ -45,25 +45,6 @@ class Args:
         },
     )
 
-    def fingerprint(self, prompt_template: str) -> str:
-        # The combination of arguments can uniquely determine the generation process
-        args = (
-            self.seed,
-            self.temperature,
-            self.model,
-            self.model_max_tokens,
-            self.min_lines,
-            self.max_lines,
-            self.chunk_size,
-            self.dataset_name,
-            self.data_dir,
-            self.max_considered_data,
-            prompt_template,
-            SYSTEM,
-            ERROR_MARGIN,
-        )
-        return magicoder.utils.compute_fingerprint(*args, hash_length=5)
-
 
 def map_dataset(examples: dict, indices: list[int], args: Args) -> dict:
     random.seed(args.seed + indices[0])
@@ -80,7 +61,7 @@ def extract_seed_code(args: Args, document: str) -> str:
     lines = document.splitlines(keepends=True)
     start_index = random.choice(range(len(lines)))
     n_lines_to_consider = random.randint(args.min_lines, args.max_lines)
-    code = "".join(lines[start_index : start_index + n_lines_to_consider])
+    code = "".join(lines[start_index: start_index + n_lines_to_consider])
     return code
 
 
@@ -97,8 +78,9 @@ def parse_problem_solution(response_text: str) -> tuple[str, str] | None:
         return None
     if problem_start_index >= solution_start_index:
         return None
-    problem = "".join(lines[problem_start_index + 1 : solution_start_index]).strip()
-    solution = "".join(lines[solution_start_index + 1 :]).strip()
+    problem = "".join(lines[problem_start_index +
+                      1: solution_start_index]).strip()
+    solution = "".join(lines[solution_start_index + 1:]).strip()
     return problem, solution
 
 
@@ -137,9 +119,7 @@ def main():
 
     prompt_template = Path("data/prompt.txt").read_text()
     timestamp = magicoder.utils.timestamp()
-    data_fingerprint = args.fingerprint(prompt_template)
     if args.continue_from is not None:
-        assert data_fingerprint in args.continue_from, "Fingerprint mismatch"
         assert f"{start_index}_{end_index}" in args.continue_from, "Index mismatch"
         old_path = Path(args.continue_from)
         assert old_path.exists()
@@ -152,7 +132,7 @@ def main():
     else:
         tag = "" if args.tag == "" else f"-{args.tag}"
         path = Path(
-            f"data{tag}-{data_fingerprint}-{start_index}_{end_index}-{timestamp}.jsonl"
+            f"data{tag}-{start_index}_{end_index}-{timestamp}.jsonl"
         )
         assert not path.exists()
         f_out = path.open("w")
@@ -196,14 +176,11 @@ def main():
         problem, solution = parsing_result
         if len(problem) == 0 or len(solution) == 0:
             continue
-        fingerprint = response.system_fingerprint
-        assert fingerprint is not None
         # In this dict seed means "seed code snippet" instead of "random seed"
         data = dict(
             raw_index=example["raw_index"],
             index=example["index"],
             seed=example["seed"],
-            openai_fingerprint=fingerprint,
             problem=problem,
             solution=solution,
         )

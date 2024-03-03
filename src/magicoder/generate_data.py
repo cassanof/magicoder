@@ -53,6 +53,7 @@ class Args:
     top_p: float = field(default=0.9)
     model: str = field(default="bigcode/starcoder2-15b")
     num_gpus: int = field(default=1)
+    batch_size: int = field(default=100)
     model_max_tokens: int = field(default=8192)
     max_new_tokens: int = field(default=2500)
 
@@ -110,6 +111,17 @@ def parse_problem_solution(response_text: str) -> tuple[str, str] | None:
     return problem, solution
 
 
+def chunkify(lst, n):
+    chunks = []
+    for i in range(0, len(lst), n):
+        chunk = []
+        for j in range(n):
+            if i + j < len(lst):
+                chunk.append(lst[i + j])
+        chunks.append(chunk)
+    return chunks
+
+
 def main():
     args, *_ = cast(
         tuple[Args, ...], HfArgumentParser(Args).parse_args_into_dataclasses()
@@ -164,11 +176,13 @@ def main():
         print("Saving to", path)
         n_skipped = 0
 
-    for index, example in enumerate(tqdm(dataset)):
+    lang = args.data_dir
+    prompts = []
+    for index, example in enumerate(tqdm(dataset, desc="Preparing prompts")):
         if index < n_skipped:
             continue
         assert index + start_index == example["index"]
-        prompt = make_starcoder2_prompt(example["seed"], args.data_dir)
+        prompt = make_starcoder2_prompt(example["seed"], lang)
         # Make sure the generation is within the context size of the model
         max_new_tokens = min(
             args.max_new_tokens,
@@ -180,8 +194,16 @@ def main():
         )
         if max_new_tokens <= 0:
             continue
-        response = model.generate(
-            prompt,
+        prompts.append((prompt, example, max_new_tokens))
+
+    batches = chunkify(prompts, args.batch_size)
+    for batch in tqdm(batches, desc="Generating data"):
+        max_new_tokens = max(batch, key=lambda x: x[2])[2]
+        prompts = [x[0] for x in batch]
+        examples = [x[1] for x in batch]
+
+        responses = model.generate(
+            prompts,
             SamplingParams(
                 temperature=args.temperature,
                 top_p=args.top_p,
@@ -189,29 +211,30 @@ def main():
                 stop=["<issue_comment>", "<issue_start>"],
             )
         )
-        choice = response[0].outputs[0]
-        if choice.finish_reason != "stop":
-            continue
-        text = "# [Problem Description]\n" + choice.text
-        parsing_result = parse_problem_solution(text)
-        if parsing_result is None:
-            continue
-        problem, solution = parsing_result
-        if len(problem) == 0 or len(solution) == 0:
-            continue
-        # In this dict seed means "seed code snippet" instead of "random seed"
-        data = dict(
-            raw_index=example["raw_index"],
-            index=example["index"],
-            seed=example["seed"],
-            problem=problem,
-            solution=solution,
-        )
+        for response, example in zip(responses, examples):
+            choice = response.outputs[0]
+            if choice.finish_reason != "stop":
+                continue
+            text = "# [Problem Description]\n" + choice.text
+            parsing_result = parse_problem_solution(text)
+            if parsing_result is None:
+                continue
+            problem, solution = parsing_result
+            if len(problem) == 0 or len(solution) == 0:
+                continue
+            # In this dict seed means "seed code snippet" instead of "random seed"
+            data = dict(
+                raw_index=example["raw_index"],
+                index=example["index"],
+                seed=example["seed"],
+                problem=problem,
+                solution=solution,
+            )
 
-        print("[Problem Description]", problem, sep="\n", end="\n\n")
-        print("[Solution]", solution, sep="\n")
+            print("[Problem Description]", problem, sep="\n", end="\n\n")
+            print("[Solution]", solution, sep="\n")
 
-        f_out.write(json.dumps(data) + "\n")
+            f_out.write(json.dumps(data) + "\n")
 
 
 if __name__ == "__main__":

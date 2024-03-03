@@ -3,6 +3,7 @@ import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
+from torch.cuda import is_bf16_supported
 from vllm import LLM, SamplingParams
 
 from datasets import Dataset, load_dataset
@@ -71,6 +72,14 @@ class Args:
             "help": "Custom tag as part of the output filename, not affecting the fingerprint"
         },
     )
+
+
+def auto_dtype() -> str:
+    import torch
+    # if bf16 is available, use it
+    if torch.cuda.is_bf16_supported():
+        return "bfloat16"
+    return "auto"
 
 
 def map_dataset(examples: dict, indices: list[int], args: Args) -> dict:
@@ -148,7 +157,12 @@ def main():
     )
     dataset = dataset.shuffle(seed=args.seed)
     dataset = dataset.map(lambda _, index: {"index": index}, with_indices=True)
-    model = LLM(args.model, tensor_parallel_size=args.num_gpus)
+    model = LLM(
+        args.model,
+        tensor_parallel_size=args.num_gpus,
+        gpu_memory_utilization=0.95,
+        dtype=auto_dtype(),
+    )
 
     # Every run should produce the same data as long as the default params are not changed
     start_index = args.seed_code_start_index

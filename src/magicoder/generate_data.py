@@ -173,7 +173,8 @@ def main():
         max_new_tokens = min(
             args.max_new_tokens,
             args.model_max_tokens
-            - magicoder.utils.num_tokens_from_string(prompt, args.model)
+            #  - magicoder.utils.num_tokens_from_string(prompt, args.model)
+            - len(model.get_tokenizer().encode(prompt))
             # error margin (e.g., due to conversation tokens)
             - ERROR_MARGIN,
         )

@@ -3,6 +3,7 @@ import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
+from vllm import LLM, SamplingParams
 
 from datasets import Dataset, load_dataset
 from tqdm.auto import tqdm
@@ -10,9 +11,32 @@ from transformers import HfArgumentParser
 
 import magicoder
 
-# DO NOT CHANGE THE FOLLOWING
-SYSTEM = "You are exceptionally skilled at crafting high-quality programming problems and offering precise solutions."
 ERROR_MARGIN = 10
+
+
+def make_starcoder2_prompt(code: str, lang: str) -> str:
+    return f"""
+<issue_start>username_0: You are exceptionally skilled at crafting high-quality programming problems and
+offering precise solutions.
+Please gain inspiration from the following random code snippet to create a
+high-quality programming problem in {lang.title()}. Present your output in two distinct sections:
+[Problem Description] and [Solution].
+
+Code snippet for inspiration:
+```{lang}
+{code}
+```
+Guidelines for each section:
+1. [Problem Description]: This should be **completely self-contained**, providing
+all the contextual information one needs to understand and solve the problem.
+Assume common programming knowledge, but ensure that any specific context,
+variables, or code snippets pertinent to this problem are explicitly included.
+2. [Solution]: Offer a comprehensive, **correct** solution that accurately
+addresses the [Problem Description] you provided.<issue_comment>username_1: Sure, no problem. I will be able to help. I am  exceptionally skilled at crafting high-quality programming problems and
+offering precise solutions.
+I will use your provided code snippet as inspiration for the problem.
+
+# [Problem Description]"""
 
 
 @dataclass(frozen=True)
@@ -25,8 +49,11 @@ class Args:
     # Keep the following arguments unchanged for reproducibility
     seed: int = field(default=976)
 
-    temperature: float = field(default=0.0)
-    model: str = field(default="gpt-3.5-turbo-1106")
+    temperature: float = field(default=0.45)
+    top_p: float = field(default=0.9)
+    model: str = field(default="bigcode/starcoder2-15b")
+    num_gpus: int = field(default=1)
+    batch_size: int = field(default=100)
     model_max_tokens: int = field(default=8192)
     max_new_tokens: int = field(default=2500)
 
@@ -45,25 +72,6 @@ class Args:
         },
     )
 
-    def fingerprint(self, prompt_template: str) -> str:
-        # The combination of arguments can uniquely determine the generation process
-        args = (
-            self.seed,
-            self.temperature,
-            self.model,
-            self.model_max_tokens,
-            self.min_lines,
-            self.max_lines,
-            self.chunk_size,
-            self.dataset_name,
-            self.data_dir,
-            self.max_considered_data,
-            prompt_template,
-            SYSTEM,
-            ERROR_MARGIN,
-        )
-        return magicoder.utils.compute_fingerprint(*args, hash_length=5)
-
 
 def map_dataset(examples: dict, indices: list[int], args: Args) -> dict:
     random.seed(args.seed + indices[0])
@@ -80,7 +88,7 @@ def extract_seed_code(args: Args, document: str) -> str:
     lines = document.splitlines(keepends=True)
     start_index = random.choice(range(len(lines)))
     n_lines_to_consider = random.randint(args.min_lines, args.max_lines)
-    code = "".join(lines[start_index : start_index + n_lines_to_consider])
+    code = "".join(lines[start_index: start_index + n_lines_to_consider])
     return code
 
 
@@ -97,9 +105,21 @@ def parse_problem_solution(response_text: str) -> tuple[str, str] | None:
         return None
     if problem_start_index >= solution_start_index:
         return None
-    problem = "".join(lines[problem_start_index + 1 : solution_start_index]).strip()
-    solution = "".join(lines[solution_start_index + 1 :]).strip()
+    problem = "".join(lines[problem_start_index +
+                      1: solution_start_index]).strip()
+    solution = "".join(lines[solution_start_index + 1:]).strip()
     return problem, solution
+
+
+def chunkify(lst, n):
+    chunks = []
+    for i in range(0, len(lst), n):
+        chunk = []
+        for j in range(n):
+            if i + j < len(lst):
+                chunk.append(lst[i + j])
+        chunks.append(chunk)
+    return chunks
 
 
 def main():
@@ -111,7 +131,6 @@ def main():
         if args.max_considered_data is not None
         else "train"
     )
-    assert magicoder.utils.OPENAI_CLIENT is not None
     dataset: Dataset = load_dataset(
         args.dataset_name,
         data_dir=args.data_dir,
@@ -129,17 +148,15 @@ def main():
     )
     dataset = dataset.shuffle(seed=args.seed)
     dataset = dataset.map(lambda _, index: {"index": index}, with_indices=True)
+    model = LLM(args.model, tensor_parallel_size=args.num_gpus)
 
     # Every run should produce the same data as long as the default params are not changed
     start_index = args.seed_code_start_index
     end_index = min(start_index + args.max_new_data, len(dataset))
     dataset = dataset.select(range(start_index, end_index))
 
-    prompt_template = Path("data/prompt.txt").read_text()
     timestamp = magicoder.utils.timestamp()
-    data_fingerprint = args.fingerprint(prompt_template)
     if args.continue_from is not None:
-        assert data_fingerprint in args.continue_from, "Fingerprint mismatch"
         assert f"{start_index}_{end_index}" in args.continue_from, "Index mismatch"
         old_path = Path(args.continue_from)
         assert old_path.exists()
@@ -152,66 +169,72 @@ def main():
     else:
         tag = "" if args.tag == "" else f"-{args.tag}"
         path = Path(
-            f"data{tag}-{data_fingerprint}-{start_index}_{end_index}-{timestamp}.jsonl"
+            f"data{tag}-{start_index}_{end_index}-{timestamp}.jsonl"
         )
         assert not path.exists()
         f_out = path.open("w")
         print("Saving to", path)
         n_skipped = 0
-    for index, example in enumerate(tqdm(dataset)):
+
+    lang = args.data_dir
+    prompts = []
+    for index, example in enumerate(tqdm(dataset, desc="Preparing prompts")):
         if index < n_skipped:
             continue
         assert index + start_index == example["index"]
-        prompt = prompt_template.format(code=example["seed"])
+        prompt = make_starcoder2_prompt(example["seed"], lang)
         # Make sure the generation is within the context size of the model
         max_new_tokens = min(
             args.max_new_tokens,
             args.model_max_tokens
-            - magicoder.utils.num_tokens_from_string(prompt, args.model)
+            #  - magicoder.utils.num_tokens_from_string(prompt, args.model)
+            - len(model.get_tokenizer().encode(prompt))
             # error margin (e.g., due to conversation tokens)
             - ERROR_MARGIN,
         )
         if max_new_tokens <= 0:
             continue
-        messages = [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": prompt},
-        ]
-        openai_seed = args.seed + example["index"]
-        response = magicoder.utils.chat_completions_with_backoff(
-            model=args.model,
-            messages=messages,
-            max_tokens=max_new_tokens,
-            n=1,
-            temperature=args.temperature,
-            seed=openai_seed,
-        )
-        print(openai_seed)
-        choice = response.choices[0]
-        if choice.finish_reason != "stop":
-            continue
-        parsing_result = parse_problem_solution(choice.message.content)
-        if parsing_result is None:
-            continue
-        problem, solution = parsing_result
-        if len(problem) == 0 or len(solution) == 0:
-            continue
-        fingerprint = response.system_fingerprint
-        assert fingerprint is not None
-        # In this dict seed means "seed code snippet" instead of "random seed"
-        data = dict(
-            raw_index=example["raw_index"],
-            index=example["index"],
-            seed=example["seed"],
-            openai_fingerprint=fingerprint,
-            problem=problem,
-            solution=solution,
-        )
+        prompts.append((prompt, example, max_new_tokens))
 
-        print("[Problem Description]", problem, sep="\n", end="\n\n")
-        print("[Solution]", solution, sep="\n")
+    batches = chunkify(prompts, args.batch_size)
+    for batch in tqdm(batches, desc="Generating data"):
+        max_new_tokens = max(batch, key=lambda x: x[2])[2]
+        prompts = [x[0] for x in batch]
+        examples = [x[1] for x in batch]
 
-        f_out.write(json.dumps(data) + "\n")
+        responses = model.generate(
+            prompts,
+            SamplingParams(
+                temperature=args.temperature,
+                top_p=args.top_p,
+                max_tokens=max_new_tokens,
+                stop=["<issue_comment>", "<issue_start>"],
+            )
+        )
+        for response, example in zip(responses, examples):
+            choice = response.outputs[0]
+            if choice.finish_reason != "stop":
+                continue
+            text = "# [Problem Description]\n" + choice.text
+            parsing_result = parse_problem_solution(text)
+            if parsing_result is None:
+                continue
+            problem, solution = parsing_result
+            if len(problem) == 0 or len(solution) == 0:
+                continue
+            # In this dict seed means "seed code snippet" instead of "random seed"
+            data = dict(
+                raw_index=example["raw_index"],
+                index=example["index"],
+                seed=example["seed"],
+                problem=problem,
+                solution=solution,
+            )
+
+            print("[Problem Description]", problem, sep="\n", end="\n\n")
+            print("[Solution]", solution, sep="\n")
+
+            f_out.write(json.dumps(data) + "\n")
 
 
 if __name__ == "__main__":

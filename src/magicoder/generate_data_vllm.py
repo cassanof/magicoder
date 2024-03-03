@@ -57,6 +57,8 @@ class Args:
     batch_size: int = field(default=100)
     model_max_tokens: int = field(default=8192)
     max_new_tokens: int = field(default=2500)
+    content_col: str = field(default="content")
+    pre_seeded: bool = field(default=False)
 
     min_lines: int = field(default=1)
     max_lines: int = field(default=15)
@@ -85,7 +87,7 @@ def auto_dtype() -> str:
 def map_dataset(examples: dict, indices: list[int], args: Args) -> dict:
     random.seed(args.seed + indices[0])
     seed_snippets = [
-        extract_seed_code(args, content) for content in examples["content"]
+        extract_seed_code(args, content) for content in examples[args.content_col]
     ]
     return {
         "seed": seed_snippets,
@@ -147,14 +149,14 @@ def main():
         num_proc=magicoder.utils.N_CORES,
     )
     random.seed(args.seed)
-    # map_fn = get_map_dataset(args)
-    dataset = dataset.map(
-        function=map_dataset,
-        fn_kwargs=dict(args=args),
-        with_indices=True,
-        batched=True,
-        batch_size=args.chunk_size,
-    )
+    if not args.pre_seeded:
+        dataset = dataset.map(
+            function=map_dataset,
+            fn_kwargs=dict(args=args),
+            with_indices=True,
+            batched=True,
+            batch_size=args.chunk_size,
+        )
     dataset = dataset.shuffle(seed=args.seed)
     dataset = dataset.map(lambda _, index: {"index": index}, with_indices=True)
     model = LLM(

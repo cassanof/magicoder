@@ -209,7 +209,7 @@ def main():
                 top_p=args.top_p,
                 max_tokens=max_new_tokens,
                 stop=["<issue_comment>", "<issue_start>",
-                      "username_0", "username_1", "username_2"],
+                      "username_0", "username_1", "username_2", "Upvotes:"],
             )
         )
         for response, example in zip(responses, examples):

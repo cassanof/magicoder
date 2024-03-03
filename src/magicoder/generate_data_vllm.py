@@ -208,7 +208,8 @@ def main():
                 temperature=args.temperature,
                 top_p=args.top_p,
                 max_tokens=max_new_tokens,
-                stop=["<issue_comment>", "<issue_start>"],
+                stop=["<issue_comment>", "<issue_start>",
+                      "username_0", "username_1", "username_2"],
             )
         )
         for response, example in zip(responses, examples):

@@ -16,8 +16,7 @@ ERROR_MARGIN = 10
 
 
 def make_starcoder2_prompt(code: str, lang: str) -> str:
-    return f"""
-<issue_start>username_0: You are exceptionally skilled at crafting high-quality programming problems and
+    return f"""<issue_start>username_0: You are exceptionally skilled at crafting high-quality programming problems and
 offering precise solutions.
 Please gain inspiration from the following random code snippet to create a
 high-quality programming problem in {lang.title()}. Present your output in two distinct sections:

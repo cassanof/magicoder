@@ -3,7 +3,6 @@ import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
-from torch.cuda import is_bf16_supported
 from vllm import LLM, SamplingParams
 
 from datasets import Dataset, load_dataset
@@ -32,8 +31,7 @@ all the contextual information one needs to understand and solve the problem.
 Assume common programming knowledge, but ensure that any specific context,
 variables, or code snippets pertinent to this problem are explicitly included.
 2. [Solution]: Offer a comprehensive, **correct** solution that accurately
-addresses the [Problem Description] you provided.<issue_comment>username_1: Sure, no problem. I will be able to help. I am  exceptionally skilled at crafting high-quality programming problems and
-offering precise solutions.
+addresses the [Problem Description] you provided.<issue_comment>username_1: Sure, no problem. I will be able to help. I am  exceptionally skilled at crafting high-quality programming problems and offering precise solutions.
 I will use your provided code snippet as inspiration for the problem.
 
 # [Problem Description]"""
@@ -58,14 +56,16 @@ class Args:
     max_new_tokens: int = field(default=2500)
     content_col: str = field(default="content")
     pre_seeded: bool = field(default=False)
+    seed_col: str = field(default="seed")
 
     min_lines: int = field(default=1)
     max_lines: int = field(default=15)
     chunk_size: int = field(default=1000)
 
-    dataset_name: str = field(default="bigcode/starcoderdata")
-    data_dir: str | None = field(default="python")
-    max_considered_data: int | None = field(default=150000)
+    dataset_name: str = field(
+        default="bigcode/python-stack-v1-functions-filtered-sc2")
+    data_dir: str | None = None
+    max_considered_data: int | None = None
 
     tag: str = field(
         default="",
@@ -89,7 +89,7 @@ def map_dataset(examples: dict, indices: list[int], args: Args) -> dict:
         extract_seed_code(args, content) for content in examples[args.content_col]
     ]
     return {
-        "seed": seed_snippets,
+        args.seed_col: seed_snippets,
         "raw_index": indices,
     }
 
@@ -197,7 +197,7 @@ def main():
         if index < n_skipped:
             continue
         assert index + start_index == example["index"]
-        prompt = make_starcoder2_prompt(example["seed"], lang)
+        prompt = make_starcoder2_prompt(example[args.seed_col], lang)
         # Make sure the generation is within the context size of the model
         max_new_tokens = min(
             args.max_new_tokens,
@@ -242,7 +242,7 @@ def main():
             data = dict(
                 raw_index=example["raw_index"],
                 index=example["index"],
-                seed=example["seed"],
+                seed=example[args.seed_col],
                 problem=problem,
                 solution=solution,
             )
